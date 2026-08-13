@@ -6,6 +6,22 @@ exceptions, no classes, concurrency as a language primitive instead of a runtime
 Every phase below calls out the JS analogue so you can map new concepts onto what you
 already know instead of learning from zero.
 
+## Repo layout
+
+One `go.mod` for the whole repo (already done). Every folder with its own
+`main.go` is an independently runnable program — Go doesn't need a new module
+per exercise the way Node needs a new `package.json` per project.
+
+```
+exercises/day-NN-topic/main.go   # small daily drills, run with: go run ./exercises/day-NN-topic
+projects/NN-project-name/        # the 7-project ladder, each gets its own folder + README.md
+```
+
+Exercise folders are numbered/prefixed by day (`day-01-hello-world`,
+`day-02-variables`, ...) so they sort chronologically and map 1:1 to the
+day-by-day checklist below. `exercises/day-01-hello-world/main.go` is scaffolded
+as the reference example.
+
 ## Flowchart
 
 ```mermaid
