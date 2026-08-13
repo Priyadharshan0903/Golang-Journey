@@ -9,6 +9,8 @@ type Rectangle struct {
 func main() {
 	r := Rectangle{Width: 5, Height: 5}
 	fmt.Println(r.Area())
+
+	compositionDemo() // defined in composition.go, same package
 }
 
 func (r Rectangle) Area() float64 {
@@ -26,3 +28,6 @@ func (r *Rectangle) Scale(factor float64) {
 	r.Width *= factor
 	r.Height *= factor
 }
+
+// Go is not using inheritance instead it is using Composition
+// Composition means , you can embed one struct into another
