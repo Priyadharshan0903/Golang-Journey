@@ -51,4 +51,11 @@ func main() {
 	fizzBuzz(15)
 
 	fmt.Println(wordCount("the quick brown fox the fox ran"))
+
+	result, err := IntegerToReturn(2, 1)
+
+	if err == nil {
+		fmt.Println(result)
+		fmt.Println("Error : ", err)
+	}
 }
