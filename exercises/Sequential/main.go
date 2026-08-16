@@ -37,4 +37,7 @@ func main() {
 	// It is hacky way to make go to wait until the spawned tasks to complete
 	// Unlike Nodejs, it won't wait for anything to return
 	// In Go, every goroutine is killed mid-flight and no matter what it's doing
+	// The Correct way is to use
+	// 		1. WaitGroup wg
+	// 		2. Channels
 }
