@@ -33,4 +33,8 @@ func main() {
 	}
 
 	fmt.Scanln()
+	// This is not the correct way to implement things
+	// It is hacky way to make go to wait until the spawned tasks to complete
+	// Unlike Nodejs, it won't wait for anything to return
+	// In Go, every goroutine is killed mid-flight and no matter what it's doing
 }
