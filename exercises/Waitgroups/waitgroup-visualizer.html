@@ -1,0 +1,693 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>sync.WaitGroup — how the counter holds main open</title>
+<style>
+  .viz-root {
+    color-scheme: light;
+    --surface-1:      #fcfcfb;
+    --page:           #f9f9f7;
+    --text-primary:   #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted:     #898781;
+    --grid:           #e1e0d9;
+    --baseline:       #c3c2b7;
+    --border:         rgba(11,11,11,0.10);
+    --series-1:       #2a78d6;
+    --series-2:       #eb6834;
+    --series-3:       #1baf7a;
+    --critical:       #d03b3b;
+    --good:           #006300;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) .viz-root {
+      color-scheme: dark;
+      --surface-1:      #1a1a19;
+      --page:           #0d0d0d;
+      --text-primary:   #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted:     #898781;
+      --grid:           #2c2c2a;
+      --baseline:       #383835;
+      --border:         rgba(255,255,255,0.10);
+      --series-1:       #3987e5;
+      --series-2:       #d95926;
+      --series-3:       #199e70;
+      --critical:       #d03b3b;
+      --good:           #0ca30c;
+    }
+  }
+  :root[data-theme="dark"] .viz-root {
+    color-scheme: dark;
+    --surface-1:      #1a1a19;
+    --page:           #0d0d0d;
+    --text-primary:   #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted:     #898781;
+    --grid:           #2c2c2a;
+    --baseline:       #383835;
+    --border:         rgba(255,255,255,0.10);
+    --series-1:       #3987e5;
+    --series-2:       #d95926;
+    --series-3:       #199e70;
+    --critical:       #d03b3b;
+    --good:           #0ca30c;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--page, #f9f9f7);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  .viz-root {
+    background: var(--page);
+    color: var(--text-primary);
+    min-height: 100vh;
+    padding: 28px 24px 48px;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; }
+
+  h1 { font-size: 21px; font-weight: 600; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .sub { font-size: 13.5px; color: var(--text-secondary); margin: 0 0 22px; line-height: 1.5; max-width: 72ch; }
+
+  .card {
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 18px 20px;
+  }
+
+  /* ---- controls ---- */
+  .bar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 14px; }
+  .seg { display: inline-flex; background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .seg button {
+    appearance: none; border: 0; background: transparent; cursor: pointer;
+    font: inherit; font-size: 13px; padding: 8px 13px; color: var(--text-secondary);
+    border-right: 1px solid var(--border); min-height: 36px;
+  }
+  .seg button:last-child { border-right: 0; }
+  .seg button[aria-pressed="true"] { background: var(--text-primary); color: var(--surface-1); font-weight: 600; }
+  .seg button:hover:not([aria-pressed="true"]) { background: var(--grid); }
+  .btn {
+    appearance: none; font: inherit; font-size: 13px; cursor: pointer;
+    background: var(--surface-1); color: var(--text-primary);
+    border: 1px solid var(--border); border-radius: 8px; padding: 8px 14px; min-height: 36px;
+  }
+  .btn:hover { background: var(--grid); }
+  .spacer { flex: 1 1 auto; }
+  .clock {
+    font-size: 13px; color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 8px 13px; background: var(--surface-1); min-height: 36px; display: flex; align-items: center;
+  }
+  .scrub { width: 100%; margin: 2px 0 18px; accent-color: var(--series-1); display: block; }
+
+  /* ---- layout ---- */
+  .cols { display: grid; grid-template-columns: minmax(0, 420px) minmax(0, 1fr); gap: 16px; align-items: start; }
+  @media (max-width: 900px) { .cols { grid-template-columns: minmax(0,1fr); } }
+
+  .lbl {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em;
+    color: var(--text-muted); font-weight: 600; margin: 0 0 10px;
+  }
+
+  /* ---- code ---- */
+  code, pre, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .code { font-size: 12.5px; line-height: 1.75; }
+  .code + .lbl { margin-top: 20px; }
+  .cl { padding: 0 8px; border-radius: 4px; white-space: pre; color: var(--text-secondary); border-left: 2px solid transparent; }
+  .cl.on { background: var(--grid); color: var(--text-primary); border-left-color: var(--series-1); font-weight: 600; }
+  .cl.bug { color: var(--critical); }
+  .cl.on.bug { border-left-color: var(--critical); }
+
+  /* ---- counter ---- */
+  .counter-row { display: flex; align-items: center; gap: 18px; margin-bottom: 6px; }
+  .hero { font-size: 46px; font-weight: 650; line-height: 1; letter-spacing: -0.02em; }
+  .hero.zero { color: var(--text-muted); }
+  .pips { display: flex; gap: 6px; }
+  .pip { width: 13px; height: 26px; border-radius: 4px; background: var(--grid); }
+  .pip.on { background: var(--series-1); }
+  .cap { font-size: 12.5px; color: var(--text-secondary); line-height: 1.5; }
+
+  /* ---- lanes ---- */
+  .lanes { margin-top: 4px; }
+  .lane {
+    display: grid; grid-template-columns: 132px minmax(0,1fr); gap: 12px;
+    align-items: center; min-height: 30px; padding: 3px 0; border-radius: 6px;
+  }
+  .lane:hover { background: color-mix(in srgb, var(--grid) 45%, transparent); }
+  .lane-name { font-size: 12.5px; color: var(--text-secondary); display: flex; align-items: center; gap: 7px; }
+  .chip { width: 9px; height: 9px; border-radius: 2px; flex: none; }
+  /* the 104px right margin is a label gutter: a bar ending at 5s still has room
+     to print "ready at 5.00s" outside the mark instead of overflowing the card */
+  .track { position: relative; height: 14px; background: var(--grid); border-radius: 4px; margin-right: 104px; }
+  .fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 4px; width: 0; }
+  .fill.pending { background: repeating-linear-gradient(135deg, var(--baseline) 0 3px, transparent 3px 7px); }
+  .end-label {
+    position: absolute; top: 50%; transform: translateY(-50%);
+    font-size: 11px; color: var(--text-secondary); white-space: nowrap; padding-left: 8px;
+    font-variant-numeric: tabular-nums;
+  }
+  .killed-mark {
+    position: absolute; left: 0; top: 50%; transform: translateY(-50%);
+    font-size: 11px; font-weight: 600; color: var(--critical); white-space: nowrap;
+    padding-left: 4px; letter-spacing: 0.02em;
+  }
+  .axis { position: relative; height: 20px; margin-left: 144px; margin-right: 104px; margin-top: 4px; border-top: 1px solid var(--baseline); }
+  .tick { position: absolute; top: 0; font-size: 11px; color: var(--text-muted); transform: translateX(-50%); padding-top: 4px; font-variant-numeric: tabular-nums; }
+  .tick::before { content: ""; position: absolute; top: -1px; left: 50%; width: 1px; height: 4px; background: var(--baseline); }
+  .nowline { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--text-primary); opacity: 0.32; }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0 0; font-size: 12px; color: var(--text-secondary); }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+
+  /* ---- console ---- */
+  .console {
+    background: var(--page); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px 14px; font-size: 12px; line-height: 1.7; min-height: 190px; max-height: 190px;
+    overflow-y: auto; color: var(--text-secondary); white-space: pre-wrap;
+  }
+  .console .empty { color: var(--text-muted); font-style: italic; font-family: system-ui, sans-serif; }
+  .console .meta { color: var(--critical); font-weight: 600; }
+  .console .ok { color: var(--good); font-weight: 600; }
+
+  /* ---- callout ---- */
+  .callout {
+    margin-top: 16px; border: 1px solid var(--border); border-left: 3px solid var(--series-1);
+    border-radius: 8px; padding: 13px 16px; background: var(--surface-1);
+    font-size: 13px; line-height: 1.6; color: var(--text-secondary);
+  }
+  .callout.bad { border-left-color: var(--critical); }
+  .callout b { color: var(--text-primary); }
+
+  /* ---- table view ---- */
+  table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+  caption { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--text-muted); font-weight: 600; padding-bottom: 10px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--grid); font-variant-numeric: tabular-nums; }
+  th { color: var(--text-muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
+  td:first-child { display: flex; align-items: center; gap: 7px; }
+  .no { color: var(--critical); font-weight: 600; }
+  .yes { color: var(--good); font-weight: 600; }
+
+  /* ---- tooltip ---- */
+  .tip {
+    position: fixed; pointer-events: none; opacity: 0; transition: opacity .12s;
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: 7px;
+    padding: 9px 11px; font-size: 12px; color: var(--text-primary); line-height: 1.55;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.13); z-index: 50; max-width: 260px;
+  }
+  .tip .t-h { font-weight: 650; margin-bottom: 3px; display: flex; align-items: center; gap: 7px; }
+  .tip .t-r { color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .fill { transition: width .06s linear; }
+  }
+</style>
+</head>
+<body>
+<div class="viz-root">
+<div class="wrap">
+
+  <h1>sync.WaitGroup — how the counter holds <code>main</code> open</h1>
+  <p class="sub">
+    Three orders, prep times 2s / 5s / 3s, each cooked in its own goroutine. The only thing standing
+    between you and an empty terminal is the WaitGroup counter reaching zero at the right moment.
+    Switch versions to see where the counter goes wrong.
+  </p>
+
+  <div class="bar">
+    <div class="seg" role="group" aria-label="Version">
+      <button data-mode="broken"  aria-pressed="true">Broken — Done() in the loop</button>
+      <button data-mode="manual"  aria-pressed="false">Manual Add / defer Done</button>
+      <button data-mode="waitgo"  aria-pressed="false">wg.Go (Go 1.25+)</button>
+    </div>
+    <div class="spacer"></div>
+    <button class="btn" id="theme">◐ Theme</button>
+  </div>
+
+  <div class="bar">
+    <button class="btn" id="play">▶ Play</button>
+    <button class="btn" id="step">⇥ Step</button>
+    <button class="btn" id="reset">↻ Reset</button>
+    <div class="seg" role="group" aria-label="Speed">
+      <button data-speed="0.5" aria-pressed="false">0.5×</button>
+      <button data-speed="1"   aria-pressed="false">1×</button>
+      <button data-speed="2"   aria-pressed="true">2×</button>
+      <button data-speed="4"   aria-pressed="false">4×</button>
+    </div>
+    <div class="spacer"></div>
+    <div class="clock" id="clock">elapsed 0.00s</div>
+  </div>
+
+  <input class="scrub" id="scrub" type="range" min="0" max="1000" value="0" aria-label="Scrub timeline">
+
+  <div class="cols">
+
+    <div class="card">
+      <p class="lbl" id="worker-lbl">The worker</p>
+      <div class="code" id="worker"></div>
+      <p class="lbl">main</p>
+      <div class="code" id="main"></div>
+    </div>
+
+    <div>
+      <div class="card">
+        <p class="lbl">WaitGroup counter</p>
+        <div class="counter-row">
+          <div class="hero" id="hero">0</div>
+          <div class="pips" id="pips"></div>
+          <div class="cap" id="cap"></div>
+        </div>
+
+        <div class="lanes" id="lanes"></div>
+        <div class="axis" id="axis"></div>
+
+        <div class="legend" id="legend"></div>
+      </div>
+
+      <div class="card" style="margin-top:16px">
+        <p class="lbl">Terminal output</p>
+        <div class="console" id="console"></div>
+      </div>
+
+      <div class="callout" id="callout"></div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:16px">
+    <table>
+      <caption id="tcap">Table view — same run, as values</caption>
+      <thead>
+        <tr><th>Order</th><th>Prep time</th><th>Starts</th><th>Finishes</th><th>Reaches your terminal?</th></tr>
+      </thead>
+      <tbody id="tbody"></tbody>
+    </table>
+  </div>
+
+</div>
+</div>
+
+<div class="tip" id="tip" role="tooltip"></div>
+
+<script>
+(() => {
+  const ORDERS = [
+    { table: 1, prep: 2, slot: 1 },
+    { table: 2, prep: 5, slot: 2 },
+    { table: 3, prep: 3, slot: 3 },
+  ];
+  const SPAN      = 5000;   // ms of virtual time the lane track represents
+  const STEP_MS   = 560;    // animation ms per setup statement
+  const LAUNCH    = [2, 0, 1];  // scheduler picks goroutines up in no guaranteed order
+  const TAIL      = 900;
+
+  const TITLES = { broken: 'broken version', manual: 'manual Add/Done version', waitgo: 'WaitGroup.Go version' };
+
+  // ---------- source shown per mode ----------
+  const WORKER = {
+    broken: [
+      ['w0',   'func processOrder(e Order) {   // no Done() here — main calls it'],
+      ['w1',   '\tfmt.Println("Executing the Order....", e.TableNumber)'],
+      ['w2',   '\ttime.Sleep(e.PrepTime)'],
+      ['w3',   '\tfmt.Printf("Order ready for %d \\n", e.TableNumber)'],
+      ['w4',   '}'],
+    ],
+    manual: [
+      ['w0',   'func processOrder(wg *sync.WaitGroup, e Order) {'],
+      ['wdone','\tdefer wg.Done()          // counter-- when this returns'],
+      ['w1',   '\tfmt.Println("Executing the Order....", e.TableNumber)'],
+      ['w2',   '\ttime.Sleep(e.PrepTime)'],
+      ['w3',   '\tfmt.Printf("Order ready for %d \\n", e.TableNumber)'],
+      ['w4',   '}'],
+    ],
+    waitgo: [
+      ['w0',   'func serveOrder(e Order) {   // no WaitGroup param needed'],
+      ['w1',   '\tfmt.Println("Executing the Order....", e.TableNumber)'],
+      ['w2',   '\ttime.Sleep(e.PrepTime)'],
+      ['w3',   '\tfmt.Printf("Order ready for %d \\n", e.TableNumber)'],
+      ['w4',   '}'],
+    ],
+  };
+
+  const MAIN = {
+    broken: [
+      ['sig',    'func main() {'],
+      ['print',  '\tfmt.Println("--- broken version ---")'],
+      ['orders', '\torders := []Order{ /* 2s, 5s, 3s */ }'],
+      ['wgdecl', '\twg := sync.WaitGroup{}'],
+      ['loop',   '\tfor _, order := range orders {'],
+      ['add',    '\t\twg.Add(1)'],
+      ['spawn',  '\t\tgo processOrder(order)'],
+      ['done',   '\t\twg.Done()        // ← the bug', true],
+      ['loopend','\t}'],
+      ['wait',   '\twg.Wait()'],
+      ['end',    '}'],
+    ],
+    manual: [
+      ['sig',    'func main() {'],
+      ['print',  '\tfmt.Println("--- manual Add/Done version ---")'],
+      ['orders', '\torders := []Order{ /* 2s, 5s, 3s */ }'],
+      ['wgdecl', '\twg := sync.WaitGroup{}'],
+      ['loop',   '\tfor _, order := range orders {'],
+      ['add',    '\t\twg.Add(1)'],
+      ['spawn',  '\t\tgo processOrder(&wg, order)'],
+      ['loopend','\t}'],
+      ['wait',   '\twg.Wait()'],
+      ['end',    '}'],
+    ],
+    waitgo: [
+      ['sig',    'func runWithWaitGo(orders []Order) {'],
+      ['print',  '\tfmt.Println("--- WaitGroup.Go version ---")'],
+      ['orders', '\t// orders: 2s, 5s, 3s'],
+      ['wgdecl', '\tvar wg sync.WaitGroup'],
+      ['loop',   '\tfor _, order := range orders {'],
+      ['wggo',   '\t\twg.Go(func() { serveOrder(order) })'],
+      ['loopend','\t}'],
+      ['wait',   '\twg.Wait()'],
+      ['end',    '}'],
+    ],
+  };
+
+  // ---------- the program, as a list of statements ----------
+  function buildSteps(mode) {
+    const s = [{ k: 'sig' }, { k: 'print' }, { k: 'orders' }, { k: 'wgdecl' }];
+    for (let i = 0; i < ORDERS.length; i++) {
+      s.push({ k: 'loop', i });
+      if (mode === 'waitgo') {
+        s.push({ k: 'wggo', i });
+      } else {
+        s.push({ k: 'add', i });
+        s.push({ k: 'spawn', i });
+        if (mode === 'broken') s.push({ k: 'done', i });
+      }
+    }
+    s.push({ k: 'wait' });
+    return s;
+  }
+
+  // ---------- replay the program up to animation time t ----------
+  function computeState(mode, t) {
+    const steps    = buildSteps(mode);
+    const setupEnd = steps.length * STEP_MS;
+
+    const st = {
+      mode, setupEnd, steps,
+      counter: 0,
+      lines: [],
+      gor: ORDERS.map(o => ({ ...o, state: 'none', startVt: null, endVt: null })),
+      mainState: 'running',
+      activeKey: null, activeIter: null,
+      vt: 0, phase: 'setup', doneFlash: false,
+    };
+
+    const cur = Math.min(steps.length - 1, Math.floor(t / STEP_MS));
+    for (let i = 0; i <= cur; i++) {
+      const s = steps[i];
+      if (s.k === 'print')  st.lines.push({ text: `--- ${TITLES[mode]} ---` });
+      if (s.k === 'add')    st.counter++;
+      if (s.k === 'spawn')  st.gor[s.i].state = 'queued';
+      if (s.k === 'done')   st.counter--;
+      if (s.k === 'wggo') { st.counter++; st.gor[s.i].state = 'queued'; }
+      if (s.k === 'wait')   st.mainState = st.counter > 0 ? 'blocked' : 'passthrough';
+      if (i === cur) { st.activeKey = s.k; st.activeIter = s.i ?? null; }
+    }
+
+    if (t < setupEnd) return st;
+
+    // ---------- work phase ----------
+    st.phase = 'work';
+    const vt = st.vt = t - setupEnd;
+
+    if (st.mainState === 'passthrough') {
+      // Counter was already 0, so Wait() never blocked. main returns at once and the
+      // runtime tears down every goroutine still sitting on the run queue.
+      st.activeKey = 'end';
+      st.mainState = 'exited';
+      st.gor.forEach(g => { if (g.state === 'queued') g.state = 'killed'; });
+      st.lines.push({ text: 'exit status 0  — process gone at 0.00s, nothing else printed', cls: 'meta' });
+      return st;
+    }
+
+    const events = [];
+    LAUNCH.forEach((gi, k) => events.push({
+      at: k * 90,
+      fn: s => {
+        s.gor[gi].state = 'running';
+        s.gor[gi].startVt = 0;
+        s.lines.push({ text: `Executing the Order....  ${ORDERS[gi].table}` });
+      }
+    }));
+    ORDERS.forEach((o, i) => events.push({
+      at: o.prep * 1000,
+      fn: s => {
+        s.gor[i].state = 'done';
+        s.gor[i].endVt = o.prep * 1000;
+        s.counter--;
+        s.lines.push({ text: `Order ready for ${o.table} ` });
+        s.lines.push({ text: '----------------------------------------' });
+      }
+    }));
+    events.push({
+      at: SPAN + 40,
+      fn: s => {
+        s.mainState = 'returned';
+        s.activeKey = 'end';
+        s.lines.push({ text: 'counter hit 0 — wg.Wait() returns, main exits cleanly', cls: 'ok' });
+      }
+    });
+    events.sort((a, b) => a.at - b.at);
+    events.forEach(e => { if (vt >= e.at) e.fn(st); });
+
+    // flash the worker's `defer wg.Done()` right after any goroutine finishes
+    st.doneFlash = ORDERS.some(o => vt >= o.prep * 1000 && vt < o.prep * 1000 + 420);
+    return st;
+  }
+
+  // ---------- runtime ----------
+  let mode = 'broken', t = 0, playing = false, speed = 2, last = null;
+  // broken mode gets a longer tail: the killed-goroutine freeze frame IS the payoff
+  const total = () => buildSteps(mode).length * STEP_MS + (mode === 'broken' ? TAIL * 3 : SPAN + TAIL);
+
+  const $ = id => document.getElementById(id);
+  const tip = $('tip');
+
+  function codeHTML(rows, activeKey) {
+    return rows.map(([k, text, bug]) => {
+      const on = k === activeKey ? ' on' : '';
+      const bd = bug ? ' bug' : '';
+      const esc = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/\t/g, '    ');
+      return `<div class="cl${on}${bd}">${esc}</div>`;
+    }).join('');
+  }
+
+  function render() {
+    const st = computeState(mode, t);
+
+    // ---- code panels
+    const workerActive = st.doneFlash ? 'wdone'
+      : (st.phase === 'work' && st.gor.some(g => g.state === 'running')) ? 'w2' : null;
+    $('worker').innerHTML = codeHTML(WORKER[mode], workerActive);
+    $('main').innerHTML   = codeHTML(MAIN[mode], st.activeKey);
+    $('worker-lbl').textContent = st.activeIter !== null && st.phase === 'setup'
+      ? `The worker — loop iteration ${st.activeIter + 1} of 3`
+      : 'The worker';
+
+    // ---- counter
+    $('hero').textContent = st.counter;
+    $('hero').className = 'hero' + (st.counter === 0 ? ' zero' : '');
+    $('pips').innerHTML = ORDERS.map((_, i) => `<div class="pip${i < st.counter ? ' on' : ''}"></div>`).join('');
+    const capText = {
+      running:     'main is still setting up.',
+      blocked:     'main is parked on wg.Wait() until this reaches 0.',
+      passthrough: 'wg.Wait() saw 0 and returned immediately — it never waited.',
+      exited:      'main returned. Every goroutine was killed mid-flight.',
+      returned:    'counter reached 0, so wg.Wait() released main.',
+    }[st.mainState];
+    $('cap').textContent = capText;
+
+    // ---- lanes
+    const pct = ms => Math.max(0, Math.min(1, ms / SPAN)) * 100;
+    const lanes = [];
+
+    // main goroutine lane
+    const mainEnd = st.mainState === 'exited' ? 0
+      : st.phase === 'work' ? Math.min(st.vt, SPAN) : 0;
+    const mainNote = st.mainState === 'exited' ? 'returned at 0.00s'
+      : st.mainState === 'returned' ? 'returned at 5.00s'
+      : st.mainState === 'blocked' ? 'blocked on Wait()' : '';
+    lanes.push(`
+      <div class="lane" data-tip="main">
+        <div class="lane-name"><span class="chip" style="background:var(--baseline)"></span>main goroutine</div>
+        <div class="track">
+          <div class="fill pending" style="width:${pct(mainEnd)}%"></div>
+          <div class="end-label" style="left:${pct(mainEnd)}%">${mainNote}</div>
+        </div>
+      </div>`);
+
+    st.gor.forEach((g, i) => {
+      const col = `var(--series-${g.slot})`;
+      let w = 0, label = '', killed = '';
+      if (g.state === 'running')      { w = Math.min(st.vt, g.prep * 1000); label = `running…`; }
+      else if (g.state === 'done')    { w = g.prep * 1000; label = `ready at ${g.prep}.00s`; }
+      else if (g.state === 'queued')  { label = st.phase === 'setup' ? 'queued' : ''; }
+      else if (g.state === 'killed')  { killed = '✕ killed before it ran'; }
+      lanes.push(`
+        <div class="lane" data-tip="${i}">
+          <div class="lane-name"><span class="chip" style="background:${col}"></span>Table ${g.table} · ${g.prep}s</div>
+          <div class="track">
+            <div class="fill" style="width:${pct(w)}%;background:${col}"></div>
+            ${killed ? `<div class="killed-mark">${killed}</div>`
+                     : `<div class="end-label" style="left:${pct(w)}%">${label}</div>`}
+          </div>
+        </div>`);
+    });
+    $('lanes').innerHTML = lanes.join('');
+
+    // ---- axis + now line
+    // the clock only runs while something is actually alive to run it
+    const dead = st.mainState === 'exited';
+    const nowPct = st.phase === 'work' && !dead ? pct(Math.min(st.vt, SPAN)) : 0;
+    $('axis').innerHTML =
+      [0, 1, 2, 3, 4, 5].map(s => `<div class="tick" style="left:${(s / 5) * 100}%">${s}s</div>`).join('') +
+      (dead ? '' : `<div class="nowline" style="left:${nowPct}%; top:-${(ORDERS.length + 1) * 30}px"></div>`);
+
+    $('legend').innerHTML = ORDERS.map(o =>
+      `<span><span class="chip" style="background:var(--series-${o.slot})"></span>Table ${o.table} (${o.prep}s)</span>`
+    ).join('') + `<span><span class="chip" style="background:var(--baseline)"></span>main (hatched = blocked)</span>`;
+
+    // ---- console
+    const con = $('console');
+    con.innerHTML = st.lines.length
+      ? st.lines.map(l => `<div class="${l.cls || ''}">${l.text}</div>`).join('')
+      : `<div class="empty">nothing printed yet</div>`;
+    con.scrollTop = con.scrollHeight;
+
+    // ---- clock
+    $('clock').textContent = dead ? 'elapsed 0.00s · process exited'
+      : st.phase === 'setup' ? 'elapsed 0.00s · these statements take nanoseconds'
+      : `elapsed ${(Math.min(st.vt, SPAN) / 1000).toFixed(2)}s`;
+
+    // ---- callout
+    const notes = {
+      broken: `<b>Add(1) then Done() land back to back, in main.</b> <code>go processOrder(…)</code> only
+        <em>queues</em> the goroutine and moves on, so <code>wg.Done()</code> fires roughly a microsecond later —
+        counter 1 → 0, three times over. <code>wg.Wait()</code> finds 0, never blocks, and <code>main</code>
+        returns at 0.00s. The three goroutines are torn down before the scheduler ever runs them. Same
+        behaviour as writing no WaitGroup at all.`,
+      manual: `<b>Done() now lives inside the goroutine</b>, as <code>defer wg.Done()</code>, so the counter only
+        drops when an order is actually plated. Counter 3 → 2 at 2s, → 1 at 3s, → 0 at 5s, and only then does
+        <code>wg.Wait()</code> release main. Note the WaitGroup is passed as <code>*sync.WaitGroup</code> —
+        pass it by value and each goroutine decrements a private copy (<code>go vet</code> catches that).`,
+      waitgo: `<b><code>wg.Go</code> owns the Add/Done pair</b>, so there is no counter to get wrong and the
+        worker needs no WaitGroup parameter at all. Identical timing to the manual version — 2s, 3s, 5s — with
+        the footgun designed out. Learn the manual form first; it's what you'll read in every existing codebase.`,
+    };
+    $('callout').innerHTML = notes[mode];
+    $('callout').className = 'callout' + (mode === 'broken' ? ' bad' : '');
+
+    // ---- table view
+    $('tbody').innerHTML = st.gor.map(g => {
+      const printed = g.state === 'done';
+      const killed  = g.state === 'killed';
+      return `<tr>
+        <td><span class="chip" style="background:var(--series-${g.slot})"></span>Table ${g.table}</td>
+        <td>${g.prep}.00s</td>
+        <td>${killed ? '—' : '0.00s'}</td>
+        <td>${printed ? g.prep + '.00s' : killed ? 'never — killed at 0.00s' : '—'}</td>
+        <td class="${printed ? 'yes' : killed ? 'no' : ''}">${printed ? 'yes' : killed ? 'no' : '…'}</td>
+      </tr>`;
+    }).join('');
+    $('tcap').textContent = `Table view — ${TITLES[mode]}, same run as values`;
+
+    $('scrub').value = Math.round((t / total()) * 1000);
+    $('play').textContent = playing ? '❚❚ Pause' : '▶ Play';
+
+    window.__st = st; // for tooltips
+  }
+
+  // ---------- tooltips ----------
+  document.addEventListener('mousemove', e => {
+    const lane = e.target.closest('.lane');
+    if (!lane) { tip.style.opacity = 0; return; }
+    const st = window.__st, key = lane.dataset.tip;
+    let html;
+    if (key === 'main') {
+      html = `<div class="t-h"><span class="chip" style="background:var(--baseline)"></span>main goroutine</div>
+              <div class="t-r">${{
+                running: 'setting up', blocked: 'parked on wg.Wait()',
+                passthrough: 'Wait() returned instantly', exited: 'returned at 0.00s — process gone',
+                returned: 'returned at 5.00s',
+              }[st.mainState]}</div>`;
+    } else {
+      const g = st.gor[+key];
+      const state = { none: 'not spawned yet', queued: 'queued — not scheduled yet',
+                      running: 'cooking', done: 'plated', killed: 'killed by process exit' }[g.state];
+      html = `<div class="t-h"><span class="chip" style="background:var(--series-${g.slot})"></span>Table ${g.table}</div>
+              <div class="t-r">prep time ${g.prep}.00s<br>${state}${g.state === 'done' ? `<br>finished at ${g.prep}.00s` : ''}</div>`;
+    }
+    tip.innerHTML = html;
+    tip.style.opacity = 1;
+    tip.style.left = Math.min(e.clientX + 14, innerWidth - 280) + 'px';
+    tip.style.top  = (e.clientY + 16) + 'px';
+  });
+
+  // ---------- controls ----------
+  function setPressed(sel, attr, val) {
+    document.querySelectorAll(sel).forEach(b => b.setAttribute('aria-pressed', String(b.dataset[attr] === String(val))));
+  }
+  document.querySelectorAll('[data-mode]').forEach(b => b.onclick = () => {
+    mode = b.dataset.mode; t = 0; playing = false;
+    setPressed('[data-mode]', 'mode', mode); render();
+  });
+  document.querySelectorAll('[data-speed]').forEach(b => b.onclick = () => {
+    speed = +b.dataset.speed; setPressed('[data-speed]', 'speed', speed);
+  });
+  $('play').onclick  = () => { if (t >= total()) t = 0; playing = !playing; last = null; render(); };
+  $('reset').onclick = () => { t = 0; playing = false; render(); };
+  $('step').onclick  = () => {
+    playing = false;
+    const st = computeState(mode, t);
+    t = st.phase === 'setup' ? (Math.floor(t / STEP_MS) + 1) * STEP_MS : Math.min(total(), t + 500);
+    render();
+  };
+  $('scrub').oninput = e => { playing = false; t = (+e.target.value / 1000) * total(); render(); };
+  $('theme').onclick = () => {
+    const cur = document.documentElement.dataset.theme
+      || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+    document.documentElement.dataset.theme = cur === 'dark' ? 'light' : 'dark';
+  };
+
+  function frame(ts) {
+    if (playing) {
+      if (last !== null) t = Math.min(total(), t + (ts - last) * speed);
+      if (t >= total()) playing = false;
+      last = ts;
+      render();
+    } else {
+      last = null;
+    }
+    requestAnimationFrame(frame);
+  }
+
+  // ?mode=manual&t=3000 — deep-link to a particular moment (also how the stills were checked)
+  const params = new URLSearchParams(location.search);
+  if (MAIN[params.get('mode')]) mode = params.get('mode');
+  const pinned = params.has('t');
+  if (pinned) t = Math.max(0, Math.min(total(), +params.get('t')));
+
+  setPressed('[data-mode]', 'mode', mode);
+  setPressed('[data-speed]', 'speed', speed);
+  render();
+  requestAnimationFrame(frame);
+
+  if (!pinned && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    setTimeout(() => { playing = true; render(); }, 700);
+  }
+})();
+</script>
+</body>
+</html>
